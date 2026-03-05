@@ -4,7 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
   },
   "keywords": [],
   "author": "",
@@ -12,6 +15,14 @@
   "dependencies": {
     "@capacitor/cli": "^8.1.0",
     "@capacitor/core": "^8.1.0",
-    "@capacitor/ios": "^8.1.0"
+    "@capacitor/ios": "^8.1.0",
+    "@supabase/supabase-js": "^2.97.0",
+    "lucide-react": "^0.575.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.1.4",
+    "vite": "^7.3.1"
   }
 }
