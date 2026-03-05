@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from './supabaseClient';
 import type { Session } from '@supabase/supabase-js';
+import cryCat from './assets/cry-cat.png';
 import {
   Trophy,
   Flame,
@@ -20,9 +21,10 @@ import {
   ChevronLeft,
   DollarSign,
   LogOut,
+  Users,
 } from 'lucide-react';
 
-type View = 'quest' | 'create' | 'vault';
+type View = 'quest' | 'create' | 'vault' | 'profile';
 type AuthMode = 'login' | 'signup';
 
 interface DbQuest {
@@ -60,10 +62,19 @@ const App = () => {
   const [penalties, setPenalties] = useState<DbPenalty[]>([]);
   const [dayCount, setDayCount] = useState(0);
 
+  // ─── Profile State ────────────────────────────────────────────
+  const [username, setUsername] = useState('');
+  const [ownedQuests, setOwnedQuests] = useState<any[]>([]);
+  const [supportingQuests, setSupportingQuests] = useState<any[]>([]);
+  const [profileLoading, setProfileLoading] = useState(false);
+
   // ─── Create Form State ────────────────────────────────────────
   const [newGoalName, setNewGoalName] = useState('');
   const [newDuration, setNewDuration] = useState(30);
   const [newBounty, setNewBounty] = useState(100);
+  const [isForSelf, setIsForSelf] = useState(true);
+  const [challengedName, setChallengedName] = useState('');
+  const [challengedEmail, setChallengedEmail] = useState('');
 
   // ─── UI State ─────────────────────────────────────────────────
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -74,6 +85,7 @@ const App = () => {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // ─── Derived Values ───────────────────────────────────────────
+  const isViewingAsSupporter = !!quest?.challenged_email;
   const progressPercentage = quest ? dayCount / quest.target_days : 0;
   const securedAmount = quest ? (quest.bounty * progressPercentage).toFixed(2) : '0.00';
   const todayStr = new Date().toISOString().split('T')[0];
@@ -107,21 +119,55 @@ const App = () => {
   useEffect(() => {
     if (session?.user) {
       fetchActiveQuest(session.user.id);
+      fetchUsername(session.user.id);
     } else {
       setQuest(null);
       setCheckedInDays([]);
       setPenalties([]);
       setDayCount(0);
+      setUsername('');
+      setOwnedQuests([]);
+      setSupportingQuests([]);
     }
   }, [session]);
 
+  useEffect(() => {
+    if (view === 'profile' && session?.user) {
+      fetchAllQuests(session.user.id);
+    }
+  }, [view]);
+
   // ─── Data Fetching ────────────────────────────────────────────
+  const fetchUsername = async (userId: string) => {
+    const { data } = await supabase
+      .from('profiles')
+      .select('username')
+      .eq('id', userId)
+      .single();
+    if (data) setUsername(data.username);
+  };
+
+  const fetchAllQuests = async (userId: string) => {
+    setProfileLoading(true);
+    const { data } = await supabase
+      .from('quests')
+      .select('*, check_ins(count)')
+      .eq('owner_id', userId)
+      .order('created_at', { ascending: false });
+    if (data) {
+      setOwnedQuests(data.filter(q => !q.challenged_email));
+      setSupportingQuests(data.filter(q => !!q.challenged_email));
+    }
+    setProfileLoading(false);
+  };
+
   const fetchActiveQuest = async (userId: string) => {
     const { data } = await supabase
       .from('quests')
       .select('*')
       .eq('owner_id', userId)
       .eq('status', 'active')
+      .is('challenged_email', null)
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -204,7 +250,7 @@ const App = () => {
 
   // ─── Quest Handlers ───────────────────────────────────────────
   const handleCheckIn = async () => {
-    if (!quest || !session?.user || checkedInToday) return;
+    if (!quest || !session?.user || checkedInToday || isViewingAsSupporter) return;
 
     const { error } = await supabase.from('check_ins').insert({
       quest_id: quest.id,
@@ -234,19 +280,41 @@ const App = () => {
         target_days: newDuration,
         bounty: newBounty,
         status: 'active',
+        challenged_name: isForSelf ? null : challengedName,
+        challenged_email: isForSelf ? null : challengedEmail,
       })
       .select()
       .single();
 
     if (!error && data) {
-      setQuest(data);
-      setCheckedInDays([]);
-      setPenalties([]);
-      setDayCount(0);
+      if (isForSelf) {
+        setQuest(data);
+        setCheckedInDays([]);
+        setPenalties([]);
+        setDayCount(0);
+      } else {
+        // Send invitation email to the challenged person
+        const { error: emailError } = await supabase.functions.invoke('send-quest-invitation', {
+          body: {
+            challengedName,
+            challengedEmail,
+            challengerUsername: username,
+            habitName: newGoalName,
+            targetDays: newDuration,
+            bounty: newBounty,
+          },
+        });
+        if (emailError) console.error('Invitation email failed:', emailError);
+      }
+
+      const navigateTo = isForSelf ? 'quest' : 'profile';
       setNewGoalName('');
       setNewDuration(30);
       setNewBounty(100);
-      setView('quest');
+      setChallengedName('');
+      setChallengedEmail('');
+      setIsForSelf(true);
+      setView(navigateTo);
     }
 
     setIsProcessing(false);
@@ -385,7 +453,7 @@ const App = () => {
 
   // ─── Render: Create Goal ──────────────────────────────────────
   const renderCreateGoal = () => (
-    <div className="max-w-md mx-auto p-6 animate-in slide-in-from-bottom-10 duration-500">
+    <div className="max-w-md mx-auto p-6 pb-32 animate-in slide-in-from-bottom-10 duration-500">
       <button onClick={() => setView('quest')} className="mb-6 flex items-center gap-2 text-slate-500 hover:text-white transition-colors">
         <ChevronLeft size={20} />
         <span className="text-xs font-bold uppercase tracking-widest">Back</span>
@@ -438,12 +506,57 @@ const App = () => {
           </div>
         </div>
 
+        {/* Who is this quest for? */}
+        <div className="space-y-2">
+          <label className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">Who is this for?</label>
+          <div className="grid grid-cols-2 gap-2 bg-[#0f0f12] p-2 rounded-2xl border border-white/10">
+            <button
+              type="button"
+              onClick={() => setIsForSelf(true)}
+              className={`py-4 rounded-xl font-bold text-sm transition-all ${isForSelf ? 'bg-white text-black' : 'text-slate-500 hover:text-white'}`}
+            >
+              Me
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsForSelf(false)}
+              className={`py-4 rounded-xl font-bold text-sm transition-all ${!isForSelf ? 'bg-white text-black' : 'text-slate-500 hover:text-white'}`}
+            >
+              Someone Else
+            </button>
+          </div>
+        </div>
+
+        {!isForSelf && (
+          <div className="space-y-3">
+            <label className="text-[10px] font-black uppercase tracking-[0.2em] text-pink-500">The Challenged</label>
+            <input
+              required
+              type="text"
+              placeholder="Their name"
+              className="w-full bg-[#0f0f12] border border-white/10 rounded-2xl p-5 font-bold focus:border-pink-500/50 outline-none transition-all text-white placeholder:text-slate-700"
+              value={challengedName}
+              onChange={(e) => setChallengedName(e.target.value)}
+            />
+            <input
+              required
+              type="email"
+              placeholder="Their email address"
+              className="w-full bg-[#0f0f12] border border-white/10 rounded-2xl p-5 font-bold focus:border-pink-500/50 outline-none transition-all text-white placeholder:text-slate-700"
+              value={challengedEmail}
+              onChange={(e) => setChallengedEmail(e.target.value)}
+            />
+          </div>
+        )}
+
         <button
           disabled={isProcessing}
           type="submit"
           className="w-full bg-gradient-to-r from-purple-600 to-pink-500 py-6 rounded-2xl font-black italic uppercase tracking-widest text-white shadow-xl shadow-purple-500/20 active:scale-95 transition-all disabled:opacity-50"
         >
-          {isProcessing ? 'CREATING QUEST...' : 'START COMMITMENT'}
+          {isProcessing
+            ? (isForSelf ? 'CREATING QUEST...' : 'SENDING CHALLENGE...')
+            : (isForSelf ? 'START COMMITMENT' : 'SEND CHALLENGE')}
         </button>
       </form>
     </div>
@@ -468,10 +581,10 @@ const App = () => {
             </h1>
           </div>
           <button
-            onClick={handleSignOut}
-            className="w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-slate-400 hover:border-red-500/50 hover:text-red-400 transition-all"
+            onClick={() => setView('profile')}
+            className="w-10 h-10 rounded-full border border-white/10 overflow-hidden hover:border-purple-500/50 transition-all"
           >
-            <LogOut size={18} />
+            <img src={cryCat} alt="avatar" className="w-full h-full object-cover" />
           </button>
         </header>
 
@@ -482,8 +595,10 @@ const App = () => {
             <div className="absolute -right-4 -top-4 w-32 h-32 bg-purple-500/10 rounded-full blur-3xl"></div>
 
             <div className="flex justify-between items-start mb-2">
-              <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-purple-400">
-                YOUR GOAL: {quest.habit_name.toUpperCase()}
+              <span className={`text-[10px] font-bold uppercase tracking-[0.2em] ${isViewingAsSupporter ? 'text-blue-400' : 'text-purple-400'}`}>
+                {isViewingAsSupporter
+                  ? `CHALLENGING: ${quest.challenged_name?.toUpperCase()}`
+                  : `YOUR GOAL: ${quest.habit_name.toUpperCase()}`}
               </span>
               <div className="flex items-center gap-1 bg-green-500/10 text-green-400 px-2 py-0.5 rounded-full text-[10px] font-bold">
                 <Zap size={10} fill="currentColor" /> LIVE
@@ -608,25 +723,37 @@ const App = () => {
           </div>
         </section>
 
-        {/* Temptation Button */}
-        <button
-          onClick={() => setIsModalOpen(true)}
-          className="w-full relative group mb-8 active:scale-95 transition-transform"
-        >
-          <div className="absolute -inset-1 bg-gradient-to-r from-red-600 to-orange-600 rounded-2xl blur opacity-20 group-hover:opacity-40 transition"></div>
-          <div className="relative bg-gradient-to-r from-red-500/10 to-orange-500/10 border border-red-500/20 rounded-2xl p-5 flex items-center justify-between backdrop-blur-xl">
-            <div className="flex items-center gap-4 text-left">
-              <div className="w-12 h-12 bg-red-500/20 rounded-xl flex items-center justify-center text-red-500">
-                <AlertCircle size={28} />
-              </div>
-              <div>
-                <h3 className="font-bold text-red-100 uppercase tracking-tight text-sm">Someone Tempted Me</h3>
-                <p className="text-xs text-red-300/60">Tap to charge them $10.00</p>
-              </div>
+        {/* Temptation Button / Supporter Banner */}
+        {isViewingAsSupporter ? (
+          <div className="mb-8 p-5 bg-blue-500/10 border border-blue-500/20 rounded-2xl flex items-center gap-4">
+            <div className="w-12 h-12 bg-blue-500/20 rounded-xl flex items-center justify-center text-blue-400 flex-shrink-0">
+              <Users size={24} />
             </div>
-            <ChevronRight className="text-red-500/50" />
+            <div>
+              <h3 className="font-bold text-blue-200 uppercase tracking-tight text-sm">Supporter View</h3>
+              <p className="text-xs text-blue-400/70 leading-snug">You challenged {quest.challenged_name}. Only they can check in.</p>
+            </div>
           </div>
-        </button>
+        ) : (
+          <button
+            onClick={() => setIsModalOpen(true)}
+            className="w-full relative group mb-8 active:scale-95 transition-transform"
+          >
+            <div className="absolute -inset-1 bg-gradient-to-r from-red-600 to-orange-600 rounded-2xl blur opacity-20 group-hover:opacity-40 transition"></div>
+            <div className="relative bg-gradient-to-r from-red-500/10 to-orange-500/10 border border-red-500/20 rounded-2xl p-5 flex items-center justify-between backdrop-blur-xl">
+              <div className="flex items-center gap-4 text-left">
+                <div className="w-12 h-12 bg-red-500/20 rounded-xl flex items-center justify-center text-red-500">
+                  <AlertCircle size={28} />
+                </div>
+                <div>
+                  <h3 className="font-bold text-red-100 uppercase tracking-tight text-sm">Someone Tempted Me</h3>
+                  <p className="text-xs text-red-300/60">Tap to charge them $10.00</p>
+                </div>
+              </div>
+              <ChevronRight className="text-red-500/50" />
+            </div>
+          </button>
+        )}
 
         {/* Penalty Feed */}
         <section>
@@ -658,6 +785,121 @@ const App = () => {
     );
   };
 
+  // ─── Render: Profile ─────────────────────────────────────────
+  const renderProfile = () => (
+    <div className="max-w-md mx-auto p-6 pb-32 animate-in fade-in duration-500">
+      {/* Header */}
+      <div className="flex items-center gap-4 mb-8 mt-2">
+        <div className="w-16 h-16 rounded-2xl border border-white/10 overflow-hidden shadow-lg shadow-purple-500/10 flex-shrink-0">
+          <img src={cryCat} alt="avatar" className="w-full h-full object-cover" />
+        </div>
+        <div>
+          <h2 className="text-xl font-black tracking-tight">@{username}</h2>
+          <p className="text-slate-500 text-sm">{session?.user.email}</p>
+        </div>
+      </div>
+
+      {/* Your Quests */}
+      <section className="mb-8">
+        <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-4 px-1">Your Quests</h3>
+        {profileLoading ? (
+          <div className="flex justify-center py-8">
+            <div className="w-6 h-6 border-2 border-white/10 border-t-purple-500 rounded-full animate-spin" />
+          </div>
+        ) : ownedQuests.length === 0 ? (
+          <div className="text-center py-8 border-2 border-dashed border-white/5 rounded-2xl">
+            <p className="text-xs text-slate-600 font-medium">No quests yet.</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {ownedQuests.map(q => {
+              const checkInCount = q.check_ins?.[0]?.count ?? 0;
+              const progress = Math.min(checkInCount / q.target_days, 1);
+              return (
+                <button
+                  key={q.id}
+                  onClick={() => { setQuest(q); fetchCheckIns(q.id); fetchPenalties(q.id); setView('quest'); }}
+                  className="w-full p-5 bg-white/5 border border-white/10 rounded-2xl text-left hover:border-purple-500/30 active:scale-95 transition-all"
+                >
+                  <div className="flex justify-between items-start mb-3">
+                    <div>
+                      <p className="font-bold text-white">{q.habit_name}</p>
+                      <p className="text-xs text-slate-500 mt-0.5">Day {checkInCount} of {q.target_days}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-full ${
+                        q.status === 'active' ? 'bg-green-500/10 text-green-400' :
+                        q.status === 'completed' ? 'bg-purple-500/10 text-purple-400' :
+                        'bg-red-500/10 text-red-400'
+                      }`}>{q.status}</span>
+                      <span className="font-black text-white">${q.bounty}</span>
+                    </div>
+                  </div>
+                  <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
+                    <div className="h-full rounded-full bg-gradient-to-r from-purple-600 to-pink-500" style={{ width: `${progress * 100}%` }} />
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+        <button
+          onClick={() => setView('create')}
+          className="w-full mt-4 p-4 border-2 border-dashed border-white/10 rounded-2xl text-slate-500 hover:text-white hover:border-white/20 transition-all flex items-center justify-center gap-2 text-sm font-bold"
+        >
+          <Plus size={16} />
+          Start New Quest
+        </button>
+      </section>
+
+      {/* Supporting */}
+      <section className="mb-8">
+        <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-4 px-1">Supporting</h3>
+        {supportingQuests.length === 0 ? (
+          <div className="text-center py-8 border-2 border-dashed border-white/5 rounded-2xl">
+            <Users size={24} className="mx-auto text-slate-700 mb-2" />
+            <p className="text-xs text-slate-600 font-medium">You're not supporting any quests yet.</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {supportingQuests.map(q => {
+              const checkInCount = q.check_ins?.[0]?.count ?? 0;
+              const progress = Math.min(checkInCount / q.target_days, 1);
+              return (
+                <button
+                  key={q.id}
+                  onClick={() => { setQuest(q); fetchCheckIns(q.id); fetchPenalties(q.id); setView('quest'); }}
+                  className="w-full p-5 bg-blue-500/5 border border-blue-500/20 rounded-2xl text-left hover:border-blue-500/40 active:scale-95 transition-all"
+                >
+                  <div className="flex justify-between items-start mb-1">
+                    <div>
+                      <p className="font-bold text-white">{q.habit_name}</p>
+                      <p className="text-xs text-blue-400 mt-0.5">Challenging {q.challenged_name}</p>
+                      <p className="text-xs text-slate-500 mt-0.5">Day {checkInCount} of {q.target_days}</p>
+                    </div>
+                    <span className="font-black text-white">${q.bounty}</span>
+                  </div>
+                  <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden mt-3">
+                    <div className="h-full rounded-full bg-gradient-to-r from-blue-600 to-purple-500" style={{ width: `${progress * 100}%` }} />
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      {/* Sign Out */}
+      <button
+        onClick={handleSignOut}
+        className="w-full p-5 bg-red-500/10 border border-red-500/20 rounded-2xl text-red-400 font-bold flex items-center justify-center gap-2 hover:bg-red-500/20 active:scale-95 transition-all"
+      >
+        <LogOut size={18} />
+        Sign Out
+      </button>
+    </div>
+  );
+
   // ─── Loading Spinner ──────────────────────────────────────────
   if (authLoading) {
     return (
@@ -676,6 +918,7 @@ const App = () => {
       <div className="flex-1 overflow-y-auto pt-safe-top">
         {view === 'quest' && renderQuest()}
         {view === 'create' && renderCreateGoal()}
+        {view === 'profile' && renderProfile()}
         {view === 'vault' && (
           <div className="p-6 text-center mt-20">
             <ShieldCheck size={48} className="mx-auto text-slate-800 mb-4" />
@@ -705,19 +948,29 @@ const App = () => {
 
         {/* Center Action Button */}
         <div className="relative -mt-12 group">
-          <div className={`absolute -inset-2 bg-gradient-to-tr from-purple-600 to-pink-500 rounded-full blur opacity-40 group-hover:opacity-60 transition duration-500 ${checkedInToday || !quest ? 'hidden' : 'animate-pulse'}`}></div>
+          <div className={`absolute -inset-2 bg-gradient-to-tr from-purple-600 to-pink-500 rounded-full blur opacity-40 group-hover:opacity-60 transition duration-500 ${checkedInToday || !quest || isViewingAsSupporter ? 'hidden' : 'animate-pulse'}`}></div>
           <button
             id="check-in-main-btn"
-            onClick={() => quest ? handleCheckIn() : setView('create')}
+            onClick={() => {
+              if (isViewingAsSupporter) return;
+              quest ? handleCheckIn() : setView('create');
+            }}
             className={`relative w-20 h-20 rounded-full flex flex-col items-center justify-center border-4 border-[#050505] transition-all duration-300 transform active:scale-75 ${
-              !quest
-                ? 'bg-purple-600 text-white shadow-xl'
-                : checkedInToday
-                  ? 'bg-green-500 text-white shadow-lg shadow-green-500/20'
-                  : 'bg-white text-black shadow-xl shadow-white/10'
+              isViewingAsSupporter
+                ? 'bg-slate-800 text-slate-600 shadow-none'
+                : !quest
+                  ? 'bg-purple-600 text-white shadow-xl'
+                  : checkedInToday
+                    ? 'bg-green-500 text-white shadow-lg shadow-green-500/20'
+                    : 'bg-white text-black shadow-xl shadow-white/10'
             }`}
           >
-            {!quest ? (
+            {isViewingAsSupporter ? (
+              <>
+                <Users size={28} strokeWidth={2} />
+                <span className="text-[8px] font-black uppercase mt-0.5 tracking-widest">Watch</span>
+              </>
+            ) : !quest ? (
               <>
                 <Plus size={36} strokeWidth={3} />
                 <span className="text-[8px] font-black uppercase mt-0.5 tracking-widest">Create</span>
@@ -745,8 +998,8 @@ const App = () => {
         </button>
 
         <button
-          onClick={handleSignOut}
-          className="flex flex-col items-center gap-1 group pb-2 text-slate-600 hover:text-white transition-colors"
+          onClick={() => setView('profile')}
+          className={`flex flex-col items-center gap-1 group pb-2 transition-all ${view === 'profile' ? 'text-purple-500' : 'text-slate-600'}`}
         >
           <User size={24} />
           <span className="text-[8px] font-bold uppercase tracking-tighter">Me</span>
