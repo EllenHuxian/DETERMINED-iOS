@@ -5,6 +5,5 @@ ios/
 .DS_Store
 .env
 supabase/.temp/
-src/assets/
 supabase/schema.sql
-
+supabase/migrations/

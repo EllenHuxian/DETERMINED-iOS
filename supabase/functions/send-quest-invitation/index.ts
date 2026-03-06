@@ -8,7 +8,7 @@ Deno.serve(async (req) => {
     return new Response('ok', { headers: corsHeaders });
   }
 
-  const { challengedName, challengedEmail, challengerUsername, habitName, targetDays, bounty } = await req.json();
+  const { challengedName, challengedEmail, challengerUsername, habitName, targetDays, bounty, acceptLink } = await req.json();
 
   const emailHtml = `
     <!DOCTYPE html>
@@ -71,6 +71,17 @@ Deno.serve(async (req) => {
                             </td>
                           </tr>
                         </table>
+                      </td>
+                    </tr>
+                  </table>
+
+                  <!-- Accept Button -->
+                  <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+                    <tr>
+                      <td align="center">
+                        <a href="${acceptLink}" style="display:inline-block;background:linear-gradient(135deg,#7c3aed,#ec4899);color:#ffffff;font-size:16px;font-weight:900;text-transform:uppercase;letter-spacing:0.1em;text-decoration:none;padding:16px 40px;border-radius:12px;">
+                          Accept the Challenge
+                        </a>
                       </td>
                     </tr>
                   </table>

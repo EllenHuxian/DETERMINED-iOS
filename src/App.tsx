@@ -24,17 +24,34 @@ import {
   Users,
 } from 'lucide-react';
 
-type View = 'quest' | 'create' | 'vault' | 'profile';
+type View = 'quest' | 'create' | 'vault' | 'profile' | 'accept';
 type AuthMode = 'login' | 'signup';
 
 interface DbQuest {
   id: string;
   owner_id: string;
+  inviter_id?: string | null;
   habit_name: string;
   target_days: number;
   bounty: number;
   status: string;
   created_at: string;
+}
+
+interface InvitationDetails {
+  id: string;
+  quest_id: string;
+  invitee_email: string;
+  token: string;
+  status: string;
+  quest: {
+    id: string;
+    habit_name: string;
+    target_days: number;
+    bounty: number;
+    status: string;
+    inviter: { username: string };
+  };
 }
 
 interface DbPenalty {
@@ -76,6 +93,12 @@ const App = () => {
   const [challengedName, setChallengedName] = useState('');
   const [challengedEmail, setChallengedEmail] = useState('');
 
+  // ─── Invitation State ─────────────────────────────────────────
+  const [pendingToken, setPendingToken] = useState<string | null>(null);
+  const [invitationDetails, setInvitationDetails] = useState<InvitationDetails | null>(null);
+  const [invitationLoading, setInvitationLoading] = useState(false);
+  const [invitationError, setInvitationError] = useState('');
+
   // ─── UI State ─────────────────────────────────────────────────
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [tempter, setTempter] = useState('');
@@ -85,7 +108,7 @@ const App = () => {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // ─── Derived Values ───────────────────────────────────────────
-  const isViewingAsSupporter = !!quest?.challenged_email;
+  const isViewingAsSupporter = !!(quest?.inviter_id && quest.inviter_id === session?.user?.id);
   const progressPercentage = quest ? dayCount / quest.target_days : 0;
   const securedAmount = quest ? (quest.bounty * progressPercentage).toFixed(2) : '0.00';
   const todayStr = new Date().toISOString().split('T')[0];
@@ -104,6 +127,15 @@ const App = () => {
 
   // ─── Auth Effects ─────────────────────────────────────────────
   useEffect(() => {
+    // Extract accept token from URL on mount
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('accept');
+    if (token) {
+      setPendingToken(token);
+      // Clean the token from the URL bar without reloading
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
       setAuthLoading(false);
@@ -120,6 +152,10 @@ const App = () => {
     if (session?.user) {
       fetchActiveQuest(session.user.id);
       fetchUsername(session.user.id);
+      // If user just signed in with a pending token, go to accept view
+      if (pendingToken) {
+        setView('accept');
+      }
     } else {
       setQuest(null);
       setCheckedInDays([]);
@@ -130,6 +166,12 @@ const App = () => {
       setSupportingQuests([]);
     }
   }, [session]);
+
+  useEffect(() => {
+    if (pendingToken) {
+      fetchInvitationDetails(pendingToken);
+    }
+  }, [pendingToken]);
 
   useEffect(() => {
     if (view === 'profile' && session?.user) {
@@ -152,11 +194,11 @@ const App = () => {
     const { data } = await supabase
       .from('quests')
       .select('*, check_ins(count)')
-      .eq('owner_id', userId)
+      .or(`owner_id.eq.${userId},inviter_id.eq.${userId}`)
       .order('created_at', { ascending: false });
     if (data) {
-      setOwnedQuests(data.filter(q => !q.challenged_email));
-      setSupportingQuests(data.filter(q => !!q.challenged_email));
+      setOwnedQuests(data.filter(q => q.owner_id === userId));
+      setSupportingQuests(data.filter(q => q.inviter_id === userId && q.owner_id !== userId));
     }
     setProfileLoading(false);
   };
@@ -167,7 +209,6 @@ const App = () => {
       .select('*')
       .eq('owner_id', userId)
       .eq('status', 'active')
-      .is('challenged_email', null)
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -219,11 +260,16 @@ const App = () => {
     }
 
     if (data.user) {
+      const newUsername = authUsername || authEmail.split('@')[0];
       const { error: profileError } = await supabase.from('profiles').insert({
         id: data.user.id,
-        username: authUsername || authEmail.split('@')[0],
+        username: newUsername,
       });
-      if (profileError) setAuthError('Account created but profile setup failed. Try signing in.');
+      if (profileError) {
+        setAuthError('Account created but profile setup failed. Try signing in.');
+      } else {
+        setUsername(newUsername);
+      }
     }
 
     setIsProcessing(false);
@@ -272,49 +318,86 @@ const App = () => {
     if (!session?.user) return;
     setIsProcessing(true);
 
-    const { data, error } = await supabase
-      .from('quests')
-      .insert({
-        owner_id: session.user.id,
-        habit_name: newGoalName,
-        target_days: newDuration,
-        bounty: newBounty,
-        status: 'active',
-        challenged_name: isForSelf ? null : challengedName,
-        challenged_email: isForSelf ? null : challengedEmail,
-      })
-      .select()
-      .single();
+    if (isForSelf) {
+      const { data, error } = await supabase
+        .from('quests')
+        .insert({
+          owner_id: session.user.id,
+          habit_name: newGoalName,
+          target_days: newDuration,
+          bounty: newBounty,
+          status: 'active',
+        })
+        .select()
+        .single();
 
-    if (!error && data) {
-      if (isForSelf) {
+      if (!error && data) {
         setQuest(data);
         setCheckedInDays([]);
         setPenalties([]);
         setDayCount(0);
-      } else {
-        // Send invitation email to the challenged person
-        const { error: emailError } = await supabase.functions.invoke('send-quest-invitation', {
-          body: {
-            challengedName,
-            challengedEmail,
-            challengerUsername: username,
-            habitName: newGoalName,
-            targetDays: newDuration,
-            bounty: newBounty,
-          },
-        });
-        if (emailError) console.error('Invitation email failed:', emailError);
+        setNewGoalName('');
+        setNewDuration(30);
+        setNewBounty(100);
+        setView('quest');
+      }
+    } else {
+      // Create quest as pending, with inviter_id set to current user
+      const { data: questData, error: questError } = await supabase
+        .from('quests')
+        .insert({
+          owner_id: session.user.id,
+          inviter_id: session.user.id,
+          habit_name: newGoalName,
+          target_days: newDuration,
+          bounty: newBounty,
+          status: 'pending',
+        })
+        .select()
+        .single();
+
+      if (questError || !questData) {
+        setIsProcessing(false);
+        return;
       }
 
-      const navigateTo = isForSelf ? 'quest' : 'profile';
+      // Create invitation record to get a token
+      const { data: invitationData, error: inviteError } = await supabase
+        .from('quest_invitations')
+        .insert({
+          quest_id: questData.id,
+          invitee_email: challengedEmail,
+        })
+        .select()
+        .single();
+
+      if (inviteError || !invitationData) {
+        setIsProcessing(false);
+        return;
+      }
+
+      // Build the acceptance link and send email
+      const acceptLink = `${window.location.origin}/?accept=${invitationData.token}`;
+      const { error: emailError } = await supabase.functions.invoke('send-quest-invitation', {
+        body: {
+          challengedName,
+          challengedEmail,
+          challengerUsername: username,
+          habitName: newGoalName,
+          targetDays: newDuration,
+          bounty: newBounty,
+          acceptLink,
+        },
+      });
+      if (emailError) console.error('Invitation email failed:', emailError);
+
       setNewGoalName('');
       setNewDuration(30);
       setNewBounty(100);
       setChallengedName('');
       setChallengedEmail('');
       setIsForSelf(true);
-      setView(navigateTo);
+      setView('profile');
     }
 
     setIsProcessing(false);
@@ -356,6 +439,107 @@ const App = () => {
     setIsModalOpen(false);
   };
 
+  // ─── Invitation Handlers ──────────────────────────────────────
+  const fetchInvitationDetails = async (token: string) => {
+    setInvitationLoading(true);
+    setInvitationError('');
+    try {
+      const { data, error } = await supabase.functions.invoke('accept-quest-invitation', {
+        body: { token },
+      });
+      if (error || data?.error) {
+        setInvitationError(data?.error || 'Invalid or expired invitation link.');
+      } else {
+        setInvitationDetails(data.invitation);
+      }
+    } catch {
+      setInvitationError('Failed to load invitation details.');
+    }
+    setInvitationLoading(false);
+  };
+
+  const handleAcceptQuest = async () => {
+    if (!pendingToken || !session?.user) return;
+    setIsProcessing(true);
+    const { data, error } = await supabase.functions.invoke('accept-quest-invitation', {
+      body: { token: pendingToken, userId: session.user.id },
+    });
+    if (error || data?.error) {
+      setInvitationError(data?.error || 'Failed to accept the challenge.');
+    } else {
+      // Quest is now active and owned by this user - fetch it and navigate
+      setPendingToken(null);
+      setInvitationDetails(null);
+      await fetchActiveQuest(session.user.id);
+      setView('quest');
+    }
+    setIsProcessing(false);
+  };
+
+  // ─── Render: Accept Quest ─────────────────────────────────────
+  const renderAcceptQuest = () => (
+    <div className="min-h-screen bg-[#050505] text-slate-100 flex items-center justify-center p-6">
+      <div className="w-full max-w-sm">
+        <div className="text-center mb-8">
+          <div className="w-16 h-16 bg-gradient-to-tr from-purple-600 to-pink-500 rounded-2xl flex items-center justify-center shadow-lg shadow-purple-500/30 mx-auto mb-4">
+            <Trophy className="text-white" size={32} />
+          </div>
+          <h1 className="text-3xl font-black tracking-tighter italic uppercase text-white">You've Been Challenged</h1>
+        </div>
+
+        {invitationLoading ? (
+          <div className="flex justify-center py-8">
+            <div className="w-8 h-8 border-2 border-white/10 border-t-purple-500 rounded-full animate-spin" />
+          </div>
+        ) : invitationError ? (
+          <div className="text-center p-6 bg-red-500/10 border border-red-500/20 rounded-2xl">
+            <p className="text-red-400 font-bold">{invitationError}</p>
+            <button onClick={() => setView('quest')} className="mt-4 text-slate-500 text-sm underline">Go to app</button>
+          </div>
+        ) : invitationDetails ? (
+          <>
+            <div className="p-6 bg-[#0f0f12] border border-white/10 rounded-2xl mb-6">
+              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-purple-400 mb-3">The Challenge</p>
+              <p className="text-2xl font-black text-white mb-4">{invitationDetails.quest.habit_name}</p>
+              <div className="grid grid-cols-3 gap-3 text-center">
+                <div className="bg-white/5 rounded-xl p-3">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">By</p>
+                  <p className="font-black text-white text-sm mt-1">@{invitationDetails.quest.inviter.username}</p>
+                </div>
+                <div className="bg-white/5 rounded-xl p-3">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Days</p>
+                  <p className="font-black text-white text-xl mt-1">{invitationDetails.quest.target_days}</p>
+                </div>
+                <div className="bg-white/5 rounded-xl p-3">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Bounty</p>
+                  <p className="font-black text-white text-xl mt-1">${invitationDetails.quest.bounty}</p>
+                </div>
+              </div>
+            </div>
+
+            {invitationError && (
+              <p className="text-red-400 text-xs text-center mb-4 bg-red-500/10 border border-red-500/20 rounded-xl p-3">{invitationError}</p>
+            )}
+
+            <button
+              onClick={handleAcceptQuest}
+              disabled={isProcessing}
+              className="w-full bg-gradient-to-r from-purple-600 to-pink-500 py-5 rounded-2xl font-black italic uppercase tracking-widest text-white shadow-xl shadow-purple-500/20 disabled:opacity-50 active:scale-95 transition-all mb-3"
+            >
+              {isProcessing ? 'ACCEPTING...' : 'ACCEPT THE CHALLENGE'}
+            </button>
+            <button
+              onClick={() => { setPendingToken(null); setInvitationDetails(null); setView('quest'); }}
+              className="w-full py-3 text-slate-500 text-xs font-bold uppercase tracking-widest hover:text-white transition-colors"
+            >
+              Decline
+            </button>
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+
   // ─── Render: Auth Screen ──────────────────────────────────────
   const renderAuth = () => (
     <div className="min-h-screen bg-[#050505] text-slate-100 flex items-center justify-center p-6">
@@ -369,6 +553,27 @@ const App = () => {
           </h1>
           <p className="text-slate-500 text-sm mt-2">Talk is cheap. Show your commitment.</p>
         </div>
+
+        {pendingToken && (
+          <div className="mb-8 p-5 bg-purple-500/10 border border-purple-500/20 rounded-2xl">
+            {invitationLoading ? (
+              <div className="flex justify-center py-2">
+                <div className="w-5 h-5 border-2 border-white/10 border-t-purple-500 rounded-full animate-spin" />
+              </div>
+            ) : invitationDetails ? (
+              <div className="text-center">
+                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-purple-400 mb-1">You've been challenged</p>
+                <p className="font-black text-white text-lg">{invitationDetails.quest.habit_name}</p>
+                <p className="text-slate-400 text-sm mt-1">
+                  by <span className="text-white font-bold">@{invitationDetails.quest.inviter.username}</span> · {invitationDetails.quest.target_days} days · ${invitationDetails.quest.bounty}
+                </p>
+                <p className="text-slate-500 text-xs mt-3">Sign in or create an account to accept</p>
+              </div>
+            ) : invitationError ? (
+              <p className="text-red-400 text-sm text-center">{invitationError}</p>
+            ) : null}
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-2 bg-white/5 p-1.5 rounded-2xl border border-white/10 mb-8">
           <button
@@ -597,7 +802,7 @@ const App = () => {
             <div className="flex justify-between items-start mb-2">
               <span className={`text-[10px] font-bold uppercase tracking-[0.2em] ${isViewingAsSupporter ? 'text-blue-400' : 'text-purple-400'}`}>
                 {isViewingAsSupporter
-                  ? `CHALLENGING: ${quest.challenged_name?.toUpperCase()}`
+                  ? `SUPPORTING: ${quest.habit_name.toUpperCase()}`
                   : `YOUR GOAL: ${quest.habit_name.toUpperCase()}`}
               </span>
               <div className="flex items-center gap-1 bg-green-500/10 text-green-400 px-2 py-0.5 rounded-full text-[10px] font-bold">
@@ -731,7 +936,7 @@ const App = () => {
             </div>
             <div>
               <h3 className="font-bold text-blue-200 uppercase tracking-tight text-sm">Supporter View</h3>
-              <p className="text-xs text-blue-400/70 leading-snug">You challenged {quest.challenged_name}. Only they can check in.</p>
+              <p className="text-xs text-blue-400/70 leading-snug">You created this challenge. Only the challenged person can check in.</p>
             </div>
           </div>
         ) : (
@@ -865,6 +1070,27 @@ const App = () => {
             {supportingQuests.map(q => {
               const checkInCount = q.check_ins?.[0]?.count ?? 0;
               const progress = Math.min(checkInCount / q.target_days, 1);
+              const isPending = q.status === 'pending';
+
+              if (isPending) {
+                return (
+                  <div
+                    key={q.id}
+                    className="w-full p-5 bg-white/5 border border-white/10 rounded-2xl opacity-60"
+                  >
+                    <div className="flex justify-between items-start mb-1">
+                      <div>
+                        <p className="font-bold text-white">{q.habit_name}</p>
+                        <p className="text-xs text-slate-500 mt-0.5">{q.target_days} days · ${q.bounty}</p>
+                      </div>
+                      <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-full bg-yellow-500/10 text-yellow-400">
+                        Pending Accept
+                      </span>
+                    </div>
+                  </div>
+                );
+              }
+
               return (
                 <button
                   key={q.id}
@@ -874,7 +1100,6 @@ const App = () => {
                   <div className="flex justify-between items-start mb-1">
                     <div>
                       <p className="font-bold text-white">{q.habit_name}</p>
-                      <p className="text-xs text-blue-400 mt-0.5">Challenging {q.challenged_name}</p>
                       <p className="text-xs text-slate-500 mt-0.5">Day {checkInCount} of {q.target_days}</p>
                     </div>
                     <span className="font-black text-white">${q.bounty}</span>
@@ -911,6 +1136,9 @@ const App = () => {
 
   // ─── Auth Gate ────────────────────────────────────────────────
   if (!session) return renderAuth();
+
+  // ─── Accept Quest (logged in with token) ──────────────────────
+  if (view === 'accept') return renderAcceptQuest();
 
   // ─── Main App ─────────────────────────────────────────────────
   return (
