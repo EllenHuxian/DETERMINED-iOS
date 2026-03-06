@@ -103,7 +103,7 @@ Deno.serve(async (req) => {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      from: 'DETERMINED <onboarding@resend.dev>',
+      from: 'DETERMINED <noreply@determined-app.com>',
       to: [challengedEmail],
       subject: `@${challengerUsername} has challenged you — DETERMINED`,
       html: emailHtml,

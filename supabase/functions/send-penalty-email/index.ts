@@ -81,7 +81,7 @@ Deno.serve(async (req) => {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      from: 'DETERMINED <onboarding@resend.dev>',
+      from: 'DETERMINED <noreply@determined-app.com>',
       to: [tempterEmail],
       subject: `You've been charged a $${amount} penalty — DETERMINED`,
       html: emailHtml,
