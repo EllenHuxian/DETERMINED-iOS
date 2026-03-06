@@ -197,8 +197,8 @@ const App = () => {
       .or(`owner_id.eq.${userId},inviter_id.eq.${userId}`)
       .order('created_at', { ascending: false });
     if (data) {
-      setOwnedQuests(data.filter(q => q.owner_id === userId));
-      setSupportingQuests(data.filter(q => q.inviter_id === userId && q.owner_id !== userId));
+      setOwnedQuests(data.filter(q => q.owner_id === userId && q.inviter_id !== userId));
+      setSupportingQuests(data.filter(q => q.inviter_id === userId));
     }
     setProfileLoading(false);
   };
@@ -377,7 +377,8 @@ const App = () => {
       }
 
       // Build the acceptance link and send email
-      const acceptLink = `${window.location.origin}/?accept=${invitationData.token}`;
+      const appUrl = import.meta.env.VITE_APP_URL || window.location.origin;
+      const acceptLink = `${appUrl}/?accept=${invitationData.token}`;
       const { error: emailError } = await supabase.functions.invoke('send-quest-invitation', {
         body: {
           challengedName,
